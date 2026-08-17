@@ -24,40 +24,33 @@ try:
 except:
     pass
 
-# Common non-ticker words to ignore
+# Expanded blacklist of non-tickers
 BLACKLIST = {
     "CEO", "CFO", "CTO", "COO", "IPO", "GDP", "FED", "SEC", "USA", "USD",
     "THE", "AND", "FOR", "NEW", "TOP", "ALL", "BIG", "NOW", "OUT", "YOU",
     "BUY", "SELL", "HOLD", "NEWS", "STOCK", "MARKET", "SHARES", "PRICE",
-    "HOME", "PLAN", "WORLD", "LARGE", "BUILD", "AFTER", "MOVING"
+    "HOME", "PLAN", "WORLD", "LARGE", "BUILD", "AFTER", "MOVING",
+    "NYC", "LA", "SF", "DC", "UK", "EU", "AI", "EV", "CEO", "CFO",
+    "TECH", "DATA", "FUND", "BANK", "CITY", "STATE", "YEAR", "TIME"
 }
 
 TOP_N = 8
 
-# Expanded free news feeds
 RSS_FEEDS = [
-    # Core financial feeds
     "https://feeds.finance.yahoo.com/rss/2.0/headline",
     "https://www.cnbc.com/id/100003114/device/rss/rss.html",
     "https://www.marketwatch.com/rss/topstories",
     "https://www.investing.com/rss/news.rss",
-
-    # Google News - Business & Stocks
     "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en",
     "https://news.google.com/rss/search?q=stocks+OR+%22stock+market%22+when:1d&hl=en-US&gl=US&ceid=US:en",
-
-    # Fox Business
     "https://moxie.foxbusiness.com/google-publisher/latest.xml",
     "https://moxie.foxbusiness.com/google-publisher/markets.xml",
-
-    # Other major free sources
     "https://seekingalpha.com/market_currents.xml",
     "https://www.businessinsider.com/rss",
-    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
 ]
 
 NAME_TO_TICKER = {
-    "tesla": "TSLA", "elon musk": "TSLA",
+    "tesla": "TSLA", "elon musk": "TSLA", "waymo": "GOOGL",
     "apple": "AAPL", "nvidia": "NVDA", "jensen huang": "NVDA",
     "microsoft": "MSFT", "amazon": "AMZN", "google": "GOOGL", "alphabet": "GOOGL",
     "meta": "META", "facebook": "META", "netflix": "NFLX",
@@ -67,6 +60,7 @@ NAME_TO_TICKER = {
     "goldman sachs": "GS", "berkshire": "BRK-B",
     "salesforce": "CRM", "adobe": "ADBE", "shopify": "SHOP",
     "coinbase": "COIN", "sofi": "SOFI", "robinhood": "HOOD",
+    "technology select sector": "XLK", "xlk": "XLK",
 }
 
 @st.cache_resource
@@ -100,10 +94,12 @@ def extract_tickers(text):
     text_lower = text.lower()
     found = set()
 
+    # Strong preference for known company names
     for name, ticker in NAME_TO_TICKER.items():
         if name in text_lower:
             found.add(ticker)
 
+    # Regex for $TICKER or uppercase words
     matches = re.findall(r'\$([A-Z]{1,5})\b|(?<![A-Za-z])([A-Z]{2,5})(?![A-Za-z])', text)
     for m in matches:
         t = m[0] or m[1]
@@ -113,10 +109,11 @@ def extract_tickers(text):
     return list(found)
 
 def get_price_info(ticker):
+    """Only return data if the ticker actually exists and has price history"""
     try:
         hist = yf.Ticker(ticker).history(period="7d")
         if len(hist) < 3:
-            return {}
+            return None   # Invalid / no data → reject this ticker
         last = hist["Close"].iloc[-1]
         prev = hist["Close"].iloc[-2]
         week = hist["Close"].iloc[0]
@@ -126,7 +123,7 @@ def get_price_info(ticker):
             "chg_5d": round(((last - week) / week) * 100, 2)
         }
     except:
-        return {}
+        return None
 
 @st.cache_data(ttl=90)
 def run_scan():
@@ -154,17 +151,19 @@ def run_scan():
 
     ideas = []
     for ticker, items in ticker_data.items():
+        # Only keep tickers that have real market data
+        price_info = get_price_info(ticker)
+        if price_info is None:
+            continue
+
         compounds = [i["sentiment"] for i in items]
         avg_sent = sum(compounds) / len(compounds)
         score = avg_sent * (1 + 0.12 * min(len(items), 5))
 
-        price_info = get_price_info(ticker)
-
-        if price_info:
-            if score > 0.10 and price_info.get("chg_5d", 0) > 1.0:
-                score *= 1.10
-            elif score < -0.10 and price_info.get("chg_5d", 0) < -1.0:
-                score *= 1.10
+        if score > 0.10 and price_info.get("chg_5d", 0) > 1.0:
+            score *= 1.10
+        elif score < -0.10 and price_info.get("chg_5d", 0) < -1.0:
+            score *= 1.10
 
         if score >= 0.13:
             signal = "BUY"
@@ -208,13 +207,10 @@ def render_section(title, items, emoji):
 
     for idea in items:
         price = idea["price_info"]
-        price_text = ""
-        if price:
-            price_text = f"${price.get('price')}  |  1d: {price.get('chg_1d', 0):+.1f}%  |  5d: {price.get('chg_5d', 0):+.1f}%"
+        price_text = f"${price.get('price')}  |  1d: {price.get('chg_1d', 0):+.1f}%  |  5d: {price.get('chg_5d', 0):+.1f}%"
 
         st.markdown(f"**{idea['ticker']}**  •  Score: `{idea['score']:+.3f}`  •  Mentions: {idea['mentions']}")
-        if price_text:
-            st.caption(price_text)
+        st.caption(price_text)
         for h in idea["headlines"]:
             st.write(f"• {h[:110]}...")
         st.divider()
@@ -224,4 +220,3 @@ render_section("WEAK POSITIVE / WATCHLIST", watches, "🟡")
 render_section("CLEAR SELL CANDIDATES", sells, "🔴")
 
 st.caption("This tool is for learning how news + sentiment systems work. Always do your own research.")
-
