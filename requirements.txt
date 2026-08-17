@@ -1,0 +1,9 @@
+streamlit
+streamlit-autorefresh
+feedparser
+vaderSentiment
+yfinance
+pandas
+requests
+transformers
+torch
