@@ -1,5 +1,5 @@
 """
-Educational Stock Idea Scanner - Improved Version
+Educational Stock Idea Scanner - Quality Focused Version
 FOR LEARNING PURPOSES ONLY – NOT FINANCIAL ADVICE
 """
 
@@ -35,6 +35,14 @@ BLACKLIST = {
     "FUTURES", "STOCKS", "GAINS", "HIGHER", "LOWER"
 }
 
+# Low quality headline patterns (heavily penalized)
+LOW_QUALITY_PHRASES = [
+    "here are", "stocks to watch", "stocks primed", "stocks that could",
+    "best stocks", "top stocks", "stocks for", "stocks set to",
+    "20 stocks", "10 stocks", "15 stocks", "stocks to buy",
+    "could benefit", "may benefit", "poised to", "ready to surge"
+]
+
 TOP_N = 6
 
 RSS_FEEDS = [
@@ -68,7 +76,8 @@ NAME_TO_TICKER = {
 BULLISH_CATALYSTS = [
     "upgrade", "upgrades", "raises guidance", "raised guidance", "beats estimates",
     "beat estimates", "strong earnings", "record revenue", "acquires", "acquisition",
-    "partnership", "fda approval", "contract win", "major deal", "buyback"
+    "partnership", "fda approval", "contract win", "major deal", "buyback",
+    "price target raised", "outperform"
 ]
 
 BEARISH_CATALYSTS = [
@@ -99,16 +108,21 @@ def get_sentiment(text):
             pass
     return sentiment_model.polarity_scores(text)["compound"]
 
+def is_low_quality_headline(text):
+    text_lower = text.lower()
+    for phrase in LOW_QUALITY_PHRASES:
+        if phrase in text_lower:
+            return True
+    return False
+
 def extract_tickers(text):
     text_lower = text.lower()
     found = set()
 
-    # Prefer company name matches
     for name, ticker in NAME_TO_TICKER.items():
         if name in text_lower:
             found.add(ticker)
 
-    # Only add raw tickers if they look clean
     matches = re.findall(r'\$([A-Z]{1,5})\b', text)
     for t in matches:
         if t not in BLACKLIST and 2 <= len(t) <= 5:
@@ -119,7 +133,7 @@ def extract_tickers(text):
 def get_market_context(ticker):
     try:
         hist = yf.Ticker(ticker).history(period="1mo")
-        if len(hist) < 20:
+        if len(hist) < 15:
             return None
 
         last = hist["Close"].iloc[-1]
@@ -127,12 +141,9 @@ def get_market_context(ticker):
         week_ago = hist["Close"].iloc[-5]
 
         sma20 = hist["Close"].rolling(20).mean().iloc[-1]
-        sma50 = hist["Close"].rolling(20).mean().iloc[-1]  # using 20 for speed on free tier
-
         avg_vol = hist["Volume"].tail(8).mean()
         vol_ratio = hist["Volume"].iloc[-1] / avg_vol if avg_vol > 0 else 1.0
 
-        # Relative strength vs SPY
         spy = yf.Ticker("SPY").history(period="1mo")
         rs = None
         if len(spy) >= 5:
@@ -158,10 +169,10 @@ def catalyst_boost(text):
     boost = 0.0
     for word in BULLISH_CATALYSTS:
         if word in text_lower:
-            boost += 0.22
+            boost += 0.25
     for word in BEARISH_CATALYSTS:
         if word in text_lower:
-            boost -= 0.22
+            boost -= 0.25
     return boost
 
 # -------------------- Main Scan --------------------
@@ -182,11 +193,20 @@ def run_scan():
 
     ticker_map = defaultdict(list)
     for art in articles:
-        sent = get_sentiment(art["text"]) + catalyst_boost(art["text"])
+        base_sent = get_sentiment(art["text"])
+        boost = catalyst_boost(art["text"])
+
+        # Heavy penalty for low quality headlines
+        if is_low_quality_headline(art["text"]):
+            boost -= 0.35
+
+        final_sent = base_sent + boost
+
         for t in extract_tickers(art["text"]):
             ticker_map[t].append({
                 "title": art["title"],
-                "sentiment": sent
+                "sentiment": final_sent,
+                "is_low_quality": is_low_quality_headline(art["text"])
             })
 
     ideas = []
@@ -198,28 +218,41 @@ def run_scan():
         compounds = [i["sentiment"] for i in items]
         avg_sent = sum(compounds) / len(compounds)
         mentions = len(items)
+        low_quality_count = sum(1 for i in items if i["is_low_quality"])
 
-        score = avg_sent * (1 + 0.12 * min(mentions, 4))
+        score = avg_sent * (1 + 0.11 * min(mentions, 4))
+
+        # Penalize if most headlines are low quality
+        if low_quality_count >= mentions * 0.6:
+            score *= 0.65
 
         # Technical confirmation
-        if score > 0.15 and ctx["chg_5d"] > 1.2 and (ctx.get("rs_vs_spy") or 0) > 0.8:
-            score *= 1.12
+        if score > 0.15 and ctx["chg_5d"] > 1.0 and (ctx.get("rs_vs_spy") or 0) > 0.5:
+            score *= 1.10
 
-        # High Conviction rules (much stricter)
+        # ========== STRICT High Conviction Rules ==========
         high_conviction = False
-        if score >= 0.32 and mentions >= 2:
+
+        # Must have strong score
+        if score >= 0.36 and mentions >= 2:
             high_conviction = True
-        if score >= 0.38:
+        if score >= 0.45:
             high_conviction = True
-        # Must have some positive price action for high conviction buys
-        if high_conviction and score > 0 and ctx["chg_5d"] < 0:
+
+        # Must not be dominated by low quality headlines
+        if low_quality_count > 0 and mentions == 1:
             high_conviction = False
 
-        if score >= 0.18:
+        # Prefer positive price action for high conviction longs
+        if high_conviction and score > 0 and ctx["chg_5d"] < -1.0:
+            high_conviction = False
+
+        # Signal classification
+        if score >= 0.19:
             signal = "BUY"
-        elif score <= -0.20:
+        elif score <= -0.22:
             signal = "SELL"
-        elif score >= 0.08:
+        elif score >= 0.09:
             signal = "WATCH"
         else:
             signal = "NEUTRAL"
@@ -243,10 +276,10 @@ st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')} • Auto-
 
 st.warning("**Educational only – Not financial advice.** These are idea candidates, not recommendations.")
 
-with st.spinner("Scanning news + price action..."):
+with st.spinner("Scanning news + analyzing quality..."):
     ideas = run_scan()
 
-high_conv = [i for i in ideas if i["signal"] == "BUY" and i["high_conviction"]][:4]
+high_conv = [i for i in ideas if i["signal"] == "BUY" and i["high_conviction"]][:3]
 buys = [i for i in ideas if i["signal"] == "BUY" and not i["high_conviction"]][:TOP_N]
 watches = [i for i in ideas if i["signal"] == "WATCH"][:TOP_N]
 sells = [i for i in ideas if i["signal"] == "SELL"][:TOP_N]
@@ -261,13 +294,11 @@ def render_section(title, items, emoji):
         ctx = idea["context"]
         st.markdown(f"**{idea['ticker']}**  •  Score: `{idea['score']:+.3f}`  •  Mentions: {idea['mentions']}")
         
-        # Cleaner mobile technical line
-        tech_line = f"${ctx['price']}   |   1d: {ctx['chg_1d']:+.1f}%   |   5d: {ctx['chg_5d']:+.1f}%"
-        st.caption(tech_line)
+        st.caption(f"${ctx['price']}   •   1d: {ctx['chg_1d']:+.1f}%   •   5d: {ctx['chg_5d']:+.1f}%")
         
-        extra = f"{ctx['trend']}   •   Vol: {ctx['vol_ratio']:.1f}x"
+        extra = f"{ctx['trend']}   •   Vol {ctx['vol_ratio']:.1f}x"
         if ctx.get("rs_vs_spy") is not None:
-            extra += f"   •   RS: {ctx['rs_vs_spy']:+.1f}"
+            extra += f"   •   RS {ctx['rs_vs_spy']:+.1f}"
         st.caption(extra)
 
         for h in idea["headlines"]:
@@ -279,4 +310,4 @@ render_section("BUY CANDIDATES", buys, "🟢")
 render_section("WATCHLIST", watches, "🟡")
 render_section("SELL CANDIDATES", sells, "🔴")
 
-st.caption("Combines news sentiment + price/volume context for educational use only.")
+st.caption("Focuses on higher-quality news + price context. Educational use only.")
