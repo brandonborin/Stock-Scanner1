@@ -11,7 +11,6 @@ from datetime import datetime
 import re
 from collections import defaultdict
 
-# Page settings
 st.set_page_config(
     page_title="Educational Stock Scanner",
     page_icon="📊",
@@ -19,27 +18,42 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Auto refresh every 2 minutes
 try:
     from streamlit_autorefresh import st_autorefresh
     st_autorefresh(interval=120 * 1000, key="refresh")
 except:
     pass
 
-# Blacklist of common non-tickers
+# Common non-ticker words to ignore
 BLACKLIST = {
     "CEO", "CFO", "CTO", "COO", "IPO", "GDP", "FED", "SEC", "USA", "USD",
     "THE", "AND", "FOR", "NEW", "TOP", "ALL", "BIG", "NOW", "OUT", "YOU",
-    "BUY", "SELL", "HOLD", "NEWS", "STOCK", "MARKET", "SHARES", "PRICE"
+    "BUY", "SELL", "HOLD", "NEWS", "STOCK", "MARKET", "SHARES", "PRICE",
+    "HOME", "PLAN", "WORLD", "LARGE", "BUILD", "AFTER", "MOVING"
 }
 
-TOP_N = 8   # Show more candidates
+TOP_N = 8
 
+# Expanded free news feeds
 RSS_FEEDS = [
+    # Core financial feeds
     "https://feeds.finance.yahoo.com/rss/2.0/headline",
     "https://www.cnbc.com/id/100003114/device/rss/rss.html",
     "https://www.marketwatch.com/rss/topstories",
     "https://www.investing.com/rss/news.rss",
+
+    # Google News - Business & Stocks
+    "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=stocks+OR+%22stock+market%22+when:1d&hl=en-US&gl=US&ceid=US:en",
+
+    # Fox Business
+    "https://moxie.foxbusiness.com/google-publisher/latest.xml",
+    "https://moxie.foxbusiness.com/google-publisher/markets.xml",
+
+    # Other major free sources
+    "https://seekingalpha.com/market_currents.xml",
+    "https://www.businessinsider.com/rss",
+    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
 ]
 
 NAME_TO_TICKER = {
@@ -86,12 +100,10 @@ def extract_tickers(text):
     text_lower = text.lower()
     found = set()
 
-    # Name matching
     for name, ticker in NAME_TO_TICKER.items():
         if name in text_lower:
             found.add(ticker)
 
-    # $TICKER or uppercase words
     matches = re.findall(r'\$([A-Z]{1,5})\b|(?<![A-Za-z])([A-Z]{2,5})(?![A-Za-z])', text)
     for m in matches:
         t = m[0] or m[1]
@@ -122,7 +134,7 @@ def run_scan():
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:10]:
+            for entry in feed.entries[:8]:
                 title = entry.get("title", "").strip()
                 summary = entry.get("summary", entry.get("description", "")).strip()
                 text = f"{title}. {summary}"
@@ -144,21 +156,22 @@ def run_scan():
     for ticker, items in ticker_data.items():
         compounds = [i["sentiment"] for i in items]
         avg_sent = sum(compounds) / len(compounds)
-        score = avg_sent * (1 + 0.15 * min(len(items), 5))
+        score = avg_sent * (1 + 0.12 * min(len(items), 5))
 
         price_info = get_price_info(ticker)
 
-        # Simple confirmation boost
         if price_info:
-            if score > 0.15 and price_info.get("chg_5d", 0) > 1.5:
-                score *= 1.12
-            elif score < -0.15 and price_info.get("chg_5d", 0) < -1.5:
-                score *= 1.12
+            if score > 0.10 and price_info.get("chg_5d", 0) > 1.0:
+                score *= 1.10
+            elif score < -0.10 and price_info.get("chg_5d", 0) < -1.0:
+                score *= 1.10
 
-        if score >= 0.18:
+        if score >= 0.13:
             signal = "BUY"
-        elif score <= -0.18:
+        elif score <= -0.15:
             signal = "SELL"
+        elif score >= 0.06:
+            signal = "WATCH"
         else:
             signal = "NEUTRAL"
 
@@ -180,12 +193,12 @@ st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} • Au
 
 st.warning("**Educational only – Not financial advice.** These are idea candidates based on news sentiment, not real recommendations.")
 
-with st.spinner("Scanning latest news..."):
+with st.spinner("Scanning latest news from multiple sources..."):
     ideas = run_scan()
 
 buys = [i for i in ideas if i["signal"] == "BUY"][:TOP_N]
+watches = [i for i in ideas if i["signal"] == "WATCH"][:TOP_N]
 sells = [i for i in ideas if i["signal"] == "SELL"][:TOP_N]
-neutrals = [i for i in ideas if i["signal"] == "NEUTRAL"][:5]
 
 def render_section(title, items, emoji):
     st.subheader(f"{emoji} {title}")
@@ -207,7 +220,8 @@ def render_section(title, items, emoji):
         st.divider()
 
 render_section("CLEAR BUY CANDIDATES", buys, "🟢")
+render_section("WEAK POSITIVE / WATCHLIST", watches, "🟡")
 render_section("CLEAR SELL CANDIDATES", sells, "🔴")
-render_section("NEUTRAL / WEAK SIGNALS", neutrals, "⚪")
 
 st.caption("This tool is for learning how news + sentiment systems work. Always do your own research.")
+
